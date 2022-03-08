@@ -1,8 +1,11 @@
 from typing import Dict, Optional
+import platform
 from pathlib import Path
 import shutil
 import sys
 from time import time
+import textwrap
+import os
 
 from chia.util.config import load_config, save_config
 from chia.util.path import mkdir, path_from_root
@@ -18,7 +21,9 @@ def db_upgrade_func(
     root_path: Path,
     in_db_path: Optional[Path] = None,
     out_db_path: Optional[Path] = None,
+    *,
     no_update_config: bool = False,
+    force: bool = False,
 ) -> None:
 
     update_config: bool = in_db_path is None and out_db_path is None and not no_update_config
@@ -44,13 +49,21 @@ def db_upgrade_func(
     total, used, free = shutil.disk_usage(out_db_path)
     in_db_size = in_db_path.stat().st_size
     if free < in_db_size:
-        print("there is not enough free space on the volume where the output database will be written:")
+        no_free: bool = free < in_db_size * 0.6
+        strength: str
+        if no_free:
+            strength = "probably not enough"
+        else:
+            strength = "very little"
+        print(f"there is {strength} free space on the volume where the output database will be written:")
         print(f"   {out_db_path}")
         print(
-            f"free space: {free / 1024 / 1024 / 1024:0.2} GiB expected at least "
+            f"free space: {free / 1024 / 1024 / 1024:0.2} GiB expected about "
             f"{in_db_size / 1024 / 1024 / 1024:0.2} GiB"
         )
-        return
+        if no_free and not force:
+            print("to override this check and convert anyway, pass --force")
+            return
 
     try:
         convert_v1_to_v2(in_db_path, out_db_path)
@@ -66,13 +79,31 @@ def db_upgrade_func(
     except RuntimeError as e:
         print(f"conversion failed with error: {e}.")
     except Exception as e:
-        print(f"conversion failed with error: {e}.")
-        print("The target v2 database is left in place (possibly in an incomplete state)")
-        print(f"  {out_db_path}")
-        print("If the failure is caused by a full disk, ensure the volumes your ")
-        print("of temporary directory and the destination database directory ")
-        print("has sufficient free space.")
-        print("alternatively specify the SQLITE_TMPDIR and re-run")
+        print(
+            textwrap.dedent(
+                f"""conversion failed with error: {e}.
+            The target v2 database is left in place (possibly in an incomplete state)
+              {out_db_path}
+            If the failure was caused by a full disk, ensure the volumes your of your
+            temporary directory and the destination database directory
+            have sufficient free space.
+        """
+            )
+        )
+        if platform.system() == "Windows":
+            temp_dir = None
+            # this is where GetTempPath() looks
+            # https://docs.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-gettemppatha
+            if "TMP" in os.environ:
+                temp_dir = os.environ["TMP"]
+            elif "TEMP" in os.environ:
+                temp_dir = os.environ["TEMP"]
+            elif "USERPROFILE" in os.environ:
+                temp_dir = os.environ["USERPROFILE"]
+            if temp_dir is not None:
+                print(f"your temporary directory may be {temp_dir}")
+        else:
+            print("alternatively specify the SQLITE_TMPDIR environment variable and re-run")
 
     print(f"\n\nLEAVING PREVIOUS DB FILE UNTOUCHED {in_db_path}\n")
 
